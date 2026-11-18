@@ -8,8 +8,38 @@ st.set_page_config(page_title="MASTER FISHING", page_icon="🎣", layout="wide")
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.5rem; max-width: 1200px;}
-div[data-testid="stMetric"] {background: rgba(128,128,128,.08); padding: 12px; border-radius: 10px;}
+.block-container {
+    padding-top: 2rem;
+    max-width: 1200px;
+}
+
+/* Evita que os títulos dos separadores fiquem cortados verticalmente. */
+div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+    min-height: 3.25rem;
+    align-items: stretch;
+    overflow: visible;
+}
+
+div[data-testid="stTabs"] button[role="tab"] {
+    min-height: 3.25rem;
+    height: auto;
+    padding: 0.85rem 1rem;
+    line-height: 1.4;
+    align-items: center;
+    white-space: nowrap;
+}
+
+div[data-testid="stTabs"] button[role="tab"] p {
+    line-height: 1.4;
+    margin: 0;
+    padding: 0;
+}
+
+div[data-testid="stMetric"] {
+    background: rgba(128,128,128,.08);
+    padding: 12px;
+    border-radius: 10px;
+}
 </style>
 """, unsafe_allow_html=True)
 
