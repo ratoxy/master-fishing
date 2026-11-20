@@ -226,17 +226,203 @@ def show_event_create(client):
             except Exception as exc:
                 st.error(f"Não foi possível criar o evento: {str(exc)[:250]}")
 
-def show_event(client, event, can_edit, can_export):
+def show_event(client, event, can_edit, can_export, is_admin=False):
     st.header(event["name"])
     st.caption(f"{event.get('organization_name') or ''} · {event.get('event_date') or 'Data por definir'} · {event.get('location') or 'Local por definir'}")
     if event.get("description"):
         st.write(event["description"])
-    participants = client.table("participants").select("id", count="exact").eq("event_id", event["id"]).execute()
+
+    participant_result = (
+        client.table("participants")
+        .select("id,registration_number,full_name,club")
+        .eq("event_id", event["id"])
+        .order("registration_number")
+        .execute()
+    )
+    participants = participant_result.data or []
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Inscritos", participants.count or 0)
+    col1.metric("Inscritos", len(participants))
     col2.metric("Estado", event.get("status", "setup").upper())
     col3.metric("Permissão", "Edição" if can_edit else "Consulta")
-    st.info("A área de inscrições, sorteios, pesagens e classificações será acrescentada nas próximas etapas. A estrutura deste evento já está criada.")
+
+    st.divider()
+    st.subheader("Inscrições e participantes")
+
+    if can_edit:
+        with st.expander("➕ Inscrever participante", expanded=not participants):
+            # Normaliza eventuais lacunas antigas antes de atribuir o próximo número.
+            # A fase temporária evita colisões caso exista uma restrição UNIQUE.
+            if participants:
+                temp_base = max(p.get("registration_number", 0) for p in participants) + len(participants) + 100
+                for offset, participant in enumerate(participants, start=1):
+                    client.table("participants").update({
+                        "registration_number": temp_base + offset
+                    }).eq("id", participant["id"]).execute()
+                for number, participant in enumerate(participants, start=1):
+                    client.table("participants").update({
+                        "registration_number": number
+                    }).eq("id", participant["id"]).execute()
+
+            next_number = len(participants) + 1
+            with st.form(f"new_participant_{event['id']}"):
+                st.caption(f"Número de inscrição atribuído automaticamente: {next_number}")
+                participant_name = st.text_input("Nome completo *")
+                participant_club = st.text_input("Clube (opcional)")
+                add_participant = st.form_submit_button("Registar inscrição", type="primary")
+            if add_participant:
+                if not participant_name.strip():
+                    st.error("O nome do participante é obrigatório.")
+                else:
+                    try:
+                        client.table("participants").insert({
+                            "event_id": event["id"],
+                            "registration_number": next_number,
+                            "full_name": participant_name.strip(),
+                            "club": participant_club.strip() or None
+                        }).execute()
+                        audit(
+                            client,
+                            "participant_registered",
+                            event_id=event["id"],
+                            details={
+                                "registration_number": next_number,
+                                "full_name": participant_name.strip(),
+                                "club": participant_club.strip()
+                            }
+                        )
+                        st.success("Participante inscrito com sucesso.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Não foi possível registar a inscrição: {str(exc)[:250]}")
+
+    if participants:
+        st.markdown("**Lista de inscritos**")
+        st.dataframe(
+            [
+                {
+                    "N.º": p["registration_number"],
+                    "Nome": p["full_name"],
+                    "Clube": p.get("club") or "—"
+                }
+                for p in participants
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+        if can_edit:
+            with st.expander("✏️ Editar participante"):
+                participant_ids = [p["id"] for p in participants]
+                selected_participant_id = st.selectbox(
+                    "Seleciona o participante",
+                    options=participant_ids,
+                    format_func=lambda pid: next(
+                        f"{p['registration_number']} — {p['full_name']}"
+                        for p in participants if p["id"] == pid
+                    ),
+                    key=f"edit_participant_select_{event['id']}"
+                )
+                selected_participant = next(
+                    p for p in participants if p["id"] == selected_participant_id
+                )
+                with st.form(f"edit_participant_{event['id']}"):
+                    edited_name = st.text_input(
+                        "Nome completo",
+                        value=selected_participant["full_name"]
+                    )
+                    edited_club = st.text_input(
+                        "Clube (opcional)",
+                        value=selected_participant.get("club") or ""
+                    )
+                    save_participant = st.form_submit_button("Guardar alterações")
+                if save_participant:
+                    if not edited_name.strip():
+                        st.error("O nome do participante é obrigatório.")
+                    else:
+                        try:
+                            client.table("participants").update({
+                                "full_name": edited_name.strip(),
+                                "club": edited_club.strip() or None
+                            }).eq("id", selected_participant_id).execute()
+                            audit(
+                                client,
+                                "participant_updated",
+                                event_id=event["id"],
+                                details={"participant_id": selected_participant_id}
+                            )
+                            st.success("Dados do participante atualizados.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Não foi possível atualizar o participante: {str(exc)[:250]}")
+
+        if is_admin:
+            with st.expander("🗑️ Remover inscrição"):
+                participant_to_remove = st.selectbox(
+                    "Seleciona a inscrição a remover",
+                    options=[p["id"] for p in participants],
+                    format_func=lambda pid: next(
+                        f"{p['registration_number']} — {p['full_name']}"
+                        for p in participants if p["id"] == pid
+                    ),
+                    key=f"delete_participant_select_{event['id']}"
+                )
+                confirm_delete = st.checkbox(
+                    "Confirmo que pretendo remover esta inscrição.",
+                    key=f"confirm_delete_participant_{event['id']}"
+                )
+                if st.button(
+                    "Remover participante",
+                    type="secondary",
+                    disabled=not confirm_delete,
+                    key=f"delete_participant_{event['id']}"
+                ):
+                    try:
+                        client.table("participants").delete().eq(
+                            "id", participant_to_remove
+                        ).execute()
+
+                        # Renumera apenas os participantes deste evento, mantendo 1..N.
+                        remaining = (
+                            client.table("participants")
+                            .select("id,registration_number")
+                            .eq("event_id", event["id"])
+                            .order("registration_number")
+                            .execute()
+                            .data or []
+                        )
+                        if remaining:
+                            # Primeiro desloca todos para números temporários, evitando
+                            # colisões com os números ainda ocupados durante a renumeração.
+                            temp_base = max(
+                                p.get("registration_number", 0) for p in remaining
+                            ) + len(remaining) + 100
+                            for offset, participant in enumerate(remaining, start=1):
+                                client.table("participants").update({
+                                    "registration_number": temp_base + offset
+                                }).eq("id", participant["id"]).execute()
+
+                            for new_number, participant in enumerate(remaining, start=1):
+                                client.table("participants").update({
+                                    "registration_number": new_number
+                                }).eq("id", participant["id"]).execute()
+
+                        audit(
+                            client,
+                            "participant_removed",
+                            event_id=event["id"],
+                            details={
+                                "participant_id": participant_to_remove,
+                                "remaining_participants_renumbered": len(remaining)
+                            }
+                        )
+                        st.success("Inscrição removida.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Não foi possível remover a inscrição: {str(exc)[:250]}")
+    else:
+        st.info("Ainda não existem participantes inscritos neste evento.")
+
     if can_edit:
         with st.expander("Editar dados do evento"):
             with st.form(f"edit_event_{event['id']}"):
@@ -310,7 +496,7 @@ def main():
                 if st.button("← Voltar à lista"):
                     st.session_state.pop("selected_event", None)
                     st.rerun()
-                show_event(client, selected_event, True, True)
+                show_event(client, selected_event, True, True, is_admin=True)
         with tabs[1]:
             show_event_create(client)
         with tabs[2]:
